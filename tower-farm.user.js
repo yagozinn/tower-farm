@@ -1,17 +1,195 @@
 // ==UserScript==
 // @name         Tower of Mages - Farm Automático
 // @namespace    tower-farm
-// @version      2.1
+// @version      2.1.1
 // @description  Farm automático da Torre Infinita com loot, chefões, inventário e empilhamento de gemas.
 // @match        https://towerofmages.online/*
 // @updateURL    https://raw.githubusercontent.com/yagozinn/tower-farm/main/tower-farm.user.js
 // @downloadURL  https://raw.githubusercontent.com/yagozinn/tower-farm/main/tower-farm.user.js
 // @run-at       document-idle
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @connect      towerfarm-license.yagohissa.workers.dev
 // ==/UserScript==
 
 (function () {
 'use strict';
+
+// ============================================================
+// LICENÇA PREMIUM
+// ============================================================
+const LICENSE_API_URL = 'https://towerfarm-license.yagohissa.workers.dev/validate';
+const LICENSE_KEY_STORAGE = 'towerFarm.license.key.v1';
+const LICENSE_DEVICE_STORAGE = 'towerFarm.license.deviceId.v1';
+const LICENSE_CHECK_INTERVAL_MS = 60 * 1000;
+let licenseActive = false;
+let licensePanelBuilt = false;
+let licenseCheckTimer = null;
+
+function normalizeLicenseKey(value) {
+return String(value || '').trim().toUpperCase().replace(/\s+/g, '');
+}
+
+function makeDeviceId() {
+try { if (crypto?.randomUUID) return `TFD-${crypto.randomUUID()}`; } catch {}
+const rnd = () => Math.random().toString(36).slice(2,10).toUpperCase();
+return `TFD-${Date.now().toString(36).toUpperCase()}-${rnd()}-${rnd()}`;
+}
+
+function getDeviceId() {
+let id = '';
+try { id = localStorage.getItem(LICENSE_DEVICE_STORAGE) || ''; } catch {}
+if (!id) {
+id = makeDeviceId();
+try { localStorage.setItem(LICENSE_DEVICE_STORAGE, id); } catch {}
+}
+return id;
+}
+
+function getSavedLicenseKey() {
+try { return normalizeLicenseKey(localStorage.getItem(LICENSE_KEY_STORAGE) || ''); } catch { return ''; }
+}
+
+function saveLicenseKey(key) {
+try { localStorage.setItem(LICENSE_KEY_STORAGE, normalizeLicenseKey(key)); } catch {}
+}
+
+function licenseRequest(payload) {
+return new Promise((resolve, reject) => {
+const body = JSON.stringify(payload);
+if (typeof GM_xmlhttpRequest === 'function') {
+GM_xmlhttpRequest({
+method: 'POST',
+url: LICENSE_API_URL,
+headers: {'Content-Type': 'application/json'},
+data: body,
+timeout: 12000,
+onload: (response) => {
+let data = {};
+try { data = JSON.parse(response.responseText || '{}'); }
+catch { reject(new Error('Resposta inválida do servidor de licenças.')); return; }
+resolve({ok: response.status >= 200 && response.status < 300, status: response.status, data});
+},
+ontimeout: () => reject(new Error('Tempo limite ao validar a licença.')),
+onerror: () => reject(new Error('Não foi possível conectar ao servidor de licenças.'))
+});
+return;
+}
+fetch(LICENSE_API_URL, {method:'POST', headers:{'Content-Type':'application/json'}, body})
+.then(async response => ({ok: response.ok, status: response.status, data: await response.json()}))
+.then(resolve).catch(reject);
+});
+}
+
+async function validatePremiumLicense(key) {
+const normalizedKey = normalizeLicenseKey(key);
+if (!normalizedKey) return {valid:false, reason:'missing_key', message:'Digite sua chave de licença Premium.'};
+try {
+const result = await licenseRequest({key: normalizedKey, deviceId: getDeviceId()});
+const data = result?.data || {};
+if (result.ok && data.valid === true) return {...data, valid:true};
+return {...data, valid:false, message:data.message || 'Licença não autorizada.'};
+} catch (err) {
+return {valid:false, reason:'network_error', message:err?.message || 'Falha de conexão com o servidor de licenças.'};
+}
+}
+
+function formatLicenseDate(value) {
+if (!value) return 'Permanente';
+const date = new Date(value);
+if (Number.isNaN(date.getTime())) return '—';
+return date.toLocaleString('pt-BR');
+}
+
+function removeLicenseGate() {
+document.getElementById('tower-farm-license-gate')?.remove();
+document.getElementById('tower-farm-license-style')?.remove();
+}
+
+function stopPremiumBecauseLicense(message) {
+licenseActive = false;
+state.running = false;
+state.acting = false;
+state.forgeRunning = false;
+state.forgeActing = false;
+config.forgeJobActive = false;
+try { saveConfig(); } catch {}
+document.getElementById('tower-farm-panel')?.remove();
+licensePanelBuilt = false;
+showLicenseGate(message || 'Sua licença precisa ser validada novamente.');
+}
+
+function showLicenseGate(initialMessage = '') {
+removeLicenseGate();
+const style = document.createElement('style');
+style.id = 'tower-farm-license-style';
+style.textContent = `
+#tower-farm-license-gate{position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;padding:20px;background:rgba(2,6,15,.72);backdrop-filter:blur(8px);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#f8fafc}
+#tower-farm-license-gate *{box-sizing:border-box}
+#tower-farm-license-gate .tflic-box{width:min(420px,calc(100vw - 32px));background:linear-gradient(160deg,#111827 0%,#080d18 72%);border:1px solid rgba(139,92,246,.42);border-radius:20px;padding:22px;box-shadow:0 28px 80px rgba(0,0,0,.58),0 0 44px rgba(124,58,237,.13)}
+#tower-farm-license-gate .tflic-brand{display:flex;align-items:center;gap:12px;margin-bottom:18px}
+#tower-farm-license-gate .tflic-logo{width:46px;height:46px;border-radius:13px;display:grid;place-items:center;background:linear-gradient(145deg,#7c3aed,#4f46e5);box-shadow:0 10px 30px rgba(124,58,237,.34);font-size:22px}
+#tower-farm-license-gate .tflic-title{font-weight:900;letter-spacing:.6px;font-size:17px}
+#tower-farm-license-gate .tflic-ver{color:#a78bfa;font-weight:800}
+#tower-farm-license-gate .tflic-sub{font-size:11px;color:#94a3b8;margin-top:2px}
+#tower-farm-license-gate .tflic-card{padding:15px;border-radius:14px;background:rgba(15,23,42,.72);border:1px solid rgba(148,163,184,.16)}
+#tower-farm-license-gate .tflic-head{font-size:15px;font-weight:850;margin-bottom:4px}
+#tower-farm-license-gate .tflic-desc{font-size:12px;line-height:1.5;color:#94a3b8;margin-bottom:13px}
+#tower-farm-license-gate .tflic-label{display:block;font-size:11px;font-weight:800;color:#cbd5e1;margin:0 0 6px}
+#tower-farm-license-gate .tflic-input{width:100%;height:44px;border-radius:11px;border:1px solid #334155;background:#0b1220;color:#fff;padding:0 13px;outline:none;font-size:14px;font-weight:750;letter-spacing:.5px;text-transform:uppercase}
+#tower-farm-license-gate .tflic-input:focus{border-color:#8b5cf6;box-shadow:0 0 0 3px rgba(139,92,246,.12)}
+#tower-farm-license-gate .tflic-btn{width:100%;height:44px;border:0;border-radius:11px;margin-top:11px;background:linear-gradient(90deg,#7c3aed,#8b5cf6 48%,#4f46e5);color:#fff;font-weight:900;cursor:pointer;box-shadow:0 10px 24px rgba(124,58,237,.25)}
+#tower-farm-license-gate .tflic-btn:disabled{opacity:.55;cursor:wait}
+#tower-farm-license-gate .tflic-msg{display:none;margin-top:11px;padding:10px 11px;border-radius:10px;font-size:12px;line-height:1.45;border:1px solid transparent}
+#tower-farm-license-gate .tflic-msg.err{display:block;color:#fecaca;background:rgba(127,29,29,.22);border-color:rgba(248,113,113,.24)}
+#tower-farm-license-gate .tflic-msg.ok{display:block;color:#bbf7d0;background:rgba(20,83,45,.22);border-color:rgba(74,222,128,.23)}
+#tower-farm-license-gate .tflic-device{margin-top:12px;padding-top:11px;border-top:1px solid rgba(148,163,184,.12);font-size:10px;color:#64748b;word-break:break-all}
+`;
+document.head.appendChild(style);
+const gate = document.createElement('div');
+gate.id = 'tower-farm-license-gate';
+gate.innerHTML = `<div class="tflic-box"><div class="tflic-brand"><div class="tflic-logo">♜</div><div><div class="tflic-title">TOWER FARM <span class="tflic-ver">PREMIUM</span></div><div class="tflic-sub">v2.1 • Desenvolvido por L AURÃO</div></div></div><div class="tflic-card"><div class="tflic-head">Ativação necessária</div><div class="tflic-desc">Digite sua chave Premium para liberar o Tower Farm neste dispositivo.</div><label class="tflic-label" for="tflic-key">CHAVE DE LICENÇA</label><input id="tflic-key" class="tflic-input" autocomplete="off" spellcheck="false" placeholder="TF-XXXX-XXXX-XXXX"><button id="tflic-activate" class="tflic-btn" type="button">ATIVAR PREMIUM</button><div id="tflic-msg" class="tflic-msg"></div><div class="tflic-device">ID deste dispositivo: <span>${getDeviceId()}</span></div></div></div>`;
+document.body.appendChild(gate);
+const input = gate.querySelector('#tflic-key');
+const button = gate.querySelector('#tflic-activate');
+const msg = gate.querySelector('#tflic-msg');
+input.value = getSavedLicenseKey();
+function setMsg(text, type='err') { msg.className = `tflic-msg ${type}`; msg.textContent = text || ''; }
+if (initialMessage) setMsg(initialMessage, initialMessage.startsWith('Validando') ? 'ok' : 'err');
+async function activate() {
+const key = normalizeLicenseKey(input.value);
+input.value = key;
+button.disabled = true;
+button.textContent = 'VALIDANDO...';
+setMsg('Validando licença com o servidor...', 'ok');
+const result = await validatePremiumLicense(key);
+if (result.valid) {
+saveLicenseKey(key);
+licenseActive = true;
+setMsg(`Premium ativado. Validade: ${formatLicenseDate(result.expiresAt)}`, 'ok');
+button.textContent = 'ATIVADO ✓';
+setTimeout(() => { removeLicenseGate(); startPremiumAfterLicense(); }, 450);
+return;
+}
+licenseActive = false;
+button.disabled = false;
+button.textContent = 'ATIVAR PREMIUM';
+setMsg(result.message || 'Licença recusada.', 'err');
+}
+button.addEventListener('click', activate);
+input.addEventListener('keydown', event => { if (event.key === 'Enter') activate(); });
+setTimeout(() => input.focus(), 50);
+}
+
+async function revalidateRunningLicense() {
+if (!licenseActive) return;
+const result = await validatePremiumLicense(getSavedLicenseKey());
+if (!result.valid) stopPremiumBecauseLicense(result.message || 'Licença inválida ou expirada.');
+}
+
+function armLicenseRevalidation() {
+if (licenseCheckTimer) clearInterval(licenseCheckTimer);
+licenseCheckTimer = setInterval(revalidateRunningLicense, LICENSE_CHECK_INTERVAL_MS);
+}
 
 // ============================================================
 // CONFIGURAÇÃO
@@ -2909,6 +3087,10 @@ false;
 // ============================================================
 
 function tick() {
+if (!licenseActive) {
+return;
+}
+
 if (
 !state.running ||
 state.acting
@@ -7250,7 +7432,8 @@ true;
 
 try {
 while (
-state.forgeRunning
+state.forgeRunning &&
+licenseActive
 ) {
 const result =
 await executarUmUpgradeForja();
@@ -8338,32 +8521,38 @@ forgeLog(
 }
 
 // ============================================================
-// INICIALIZAÇÃO
+// INICIALIZAÇÃO COM LICENÇA
 // ============================================================
 
+function startPremiumAfterLicense() {
+if (!licenseActive || licensePanelBuilt) return;
+licensePanelBuilt = true;
 buildPanel();
-
-setInterval(
-async () => {
-if (
-state.forgeRunning ||
-!forgeItemSelectEl ||
-forgeItemSelectEl.offsetParent === null
-) {
-return;
+setInterval(async () => {
+if (!licenseActive || state.forgeRunning || !forgeItemSelectEl || forgeItemSelectEl.offsetParent === null) return;
+/* Varredura pesada da Mochila continua manual pelo botão ATUALIZAR ITENS. */
+}, 1500);
+armLicenseRevalidation();
+log('✅ Tower Farm v2.1 Premium ativado. Configure e aperte Iniciar.');
 }
 
-/*
-A Mochila exige hover para revelar os nomes, então não fazemos
-varredura pesada automática a cada 1,5 s. O botão ATUALIZAR ITENS
-é a fonte confiável para uma nova varredura completa.
-*/
-},
-1500
-);
+async function bootstrapPremiumLicense() {
+const savedKey = getSavedLicenseKey();
+if (!savedKey) { showLicenseGate(); return; }
+showLicenseGate('Validando sua licença salva...');
+const button = document.getElementById('tflic-activate');
+if (button) { button.disabled = true; button.textContent = 'VALIDANDO...'; }
+const result = await validatePremiumLicense(savedKey);
+if (result.valid) {
+licenseActive = true;
+removeLicenseGate();
+startPremiumAfterLicense();
+return;
+}
+licenseActive = false;
+showLicenseGate(result.message || 'Não foi possível validar sua licença.');
+}
 
-log(
-'✅ Tower Farm v2.1 carregado. Configure e aperte Iniciar.'
-);
+bootstrapPremiumLicense();
 
 })();
