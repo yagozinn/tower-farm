@@ -4,6 +4,8 @@
 // @version      2.1
 // @description  Farm automático da Torre Infinita com loot, chefões, inventário e empilhamento de gemas.
 // @match        https://towerofmages.online/*
+// @updateURL    https://raw.githubusercontent.com/yagozinn/tower-farm/main/tower-farm.user.js
+// @downloadURL  https://raw.githubusercontent.com/yagozinn/tower-farm/main/tower-farm.user.js
 // @run-at       document-idle
 // @grant        none
 // ==/UserScript==
